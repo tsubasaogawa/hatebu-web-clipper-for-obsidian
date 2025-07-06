@@ -161,7 +161,7 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
             print(f"   Date: {date}")
             print("-" * 25)
 
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         print("❌ JSONのパース中にエラーが発生しました。レスポンスがJSON形式ではない可能性があります。")
         print(f"レスポンス内容:\n{response.text}")
         return
