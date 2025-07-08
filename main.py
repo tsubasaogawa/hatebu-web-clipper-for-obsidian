@@ -112,7 +112,9 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
     """
     はてなブックマークの指定されたAPIを使い、タグでブックマークを取得する。
     """
+
     md = MarkItDown() # MarkItDownのインスタンスを作成
+
     # OAuth1セッションを作成
     try:
         hatena = OAuth1Session(
