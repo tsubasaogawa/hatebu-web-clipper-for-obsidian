@@ -7,12 +7,17 @@
 # dependencies = [
 #     "requests-oauthlib>=1.3.1",
 #     "python-dotenv>=1.0.1",
+#     "markitdown>=0.1.2",
+#     "requests>=2.32.3",
 # ]
-# requires-python = ">=3.13"
+# requires-python = ">=3.10"
 # ///
 
 import os
 import json
+import requests
+import io
+from markitdown import MarkItDown
 from dotenv import load_dotenv
 from requests_oauthlib import OAuth1Session
 
@@ -107,6 +112,9 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
     """
     はてなブックマークの指定されたAPIを使い、タグでブックマークを取得する。
     """
+
+    md = MarkItDown() # MarkItDownのインスタンスを作成
+
     # OAuth1セッションを作成
     try:
         hatena = OAuth1Session(
@@ -150,18 +158,36 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
         for bookmark in bookmarks:
             # JSONレスポンスの構造に合わせてキーを指定
             entry = bookmark.get("entry", {})
-            title = entry.get("title", "タイトル不明")
-            url = entry.get("url", "URL不明")
-            comment = bookmark.get("comment", "")
-            date = bookmark.get("created_at", "")
+            url = entry.get("url")
 
-            print(f"■ {title}")
-            print(f"   URL: {url}")
-            print(f"   Comment: {comment}")
-            print(f"   Date: {date}")
-            print("-" * 25)
+            if not url:
+                print("URLが見つかりませんでした。スキップします。")
+                continue
 
-    except (json.JSONDecodeError, ValueError):
+            try:
+                print(f"⬇️  Downloading HTML from {url}...")
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                html_content = response.text
+
+                print("🔄 Converting HTML to Markdown...")
+                # HTMLコンテンツをバイナリストリームに変換
+                # ファイル名を指定することで、HTMLコンバーターが選択されるようにする
+                html_stream = io.BytesIO(html_content.encode('utf-8'))
+                result = md.convert(html_stream, input_filename="page.html")
+                markdown_content = result.text_content
+
+                print("\n--- Markdown Output ---")
+                print(markdown_content)
+                print("--- End of Markdown ---\n")
+
+            except requests.RequestException as e:
+                print(f"❌ Error fetching URL {url}: {e}")
+            except Exception as e:
+                print(f"❌ An unexpected error occurred during conversion: {e}")
+
+
+    except json.JSONDecodeError:
         print("❌ JSONのパース中にエラーが発生しました。レスポンスがJSON形式ではない可能性があります。")
         print(f"レスポンス内容:\n{response.text}")
         return
