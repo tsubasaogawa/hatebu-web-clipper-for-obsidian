@@ -9,6 +9,7 @@
 #     "python-dotenv>=1.0.1",
 #     "markitdown>=0.1.2",
 #     "requests>=2.32.3",
+#     "pathvalidate>=3.2.0",
 # ]
 # requires-python = ">=3.10"
 # ///
@@ -17,7 +18,10 @@ import os
 import json
 import requests
 import io
+import datetime
+import argparse
 from markitdown import MarkItDown
+from pathvalidate import sanitize_filename
 from dotenv import load_dotenv
 from requests_oauthlib import OAuth1Session
 
@@ -108,10 +112,14 @@ def load_or_create_tokens():
         return get_access_tokens()
 
 
-def fetch_bookmarks_by_tag(access_token, access_token_secret):
+def fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir):
     """
     はてなブックマークの指定されたAPIを使い、タグでブックマークを取得する。
     """
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        print(f"Markdownファイルを '{save_dir}' に保存します。")
+
     md = MarkItDown() # MarkItDownのインスタンスを作成
     # OAuth1セッションを作成
     try:
@@ -157,6 +165,8 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
             # JSONレスポンスの構造に合わせてキーを指定
             entry = bookmark.get("entry", {})
             url = entry.get("url")
+            title = entry.get("title", "No Title")
+            safe_title = sanitize_filename(title)
 
             if not url:
                 print("URLが見つかりませんでした。スキップします。")
@@ -169,15 +179,24 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
                 html_content = response.text
 
                 print("🔄 Converting HTML to Markdown...")
-                # HTMLコンテンツをバイナリストリームに変換
-                # ファイル名を指定することで、HTMLコンバーターが選択されるようにする
                 html_stream = io.BytesIO(html_content.encode('utf-8'))
                 result = md.convert(html_stream, input_filename="page.html")
                 markdown_content = result.text_content
 
-                print("\n--- Markdown Output ---")
-                print(markdown_content)
-                print("--- End of Markdown ---\n")
+                if save_dir:
+                    yyyymmdd = datetime.date.today().strftime('%Y%m%d')
+                    file_name = f"{yyyymmdd}_{safe_title}.md"
+                    file_path = os.path.join(save_dir, file_name)
+
+                    print(f"💾 Saving Markdown to {file_path}...")
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(markdown_content)
+                    print(f"✅ Saved successfully.")
+                else:
+                    # 保存先が指定されていない場合は標準出力する
+                    print("\n--- Markdown Output ---")
+                    print(markdown_content)
+                    print("--- End of Markdown ---\n")
 
             except requests.RequestException as e:
                 print(f"❌ Error fetching URL {url}: {e}")
@@ -194,6 +213,10 @@ def main():
     """
     メイン処理
     """
+    parser = argparse.ArgumentParser(description="Fetch Hatena Bookmarks and convert to Markdown.")
+    parser.add_argument("--save-dir", type=str, help="Directory to save Markdown files.")
+    args = parser.parse_args()
+
     # .envファイルから環境変数を再読み込み
     # これにより、CONSUMER_KEYとCONSUMER_SECRETが正しく設定される
     global CONSUMER_KEY, CONSUMER_SECRET
@@ -213,7 +236,7 @@ def main():
         access_token_secret = tokens.get("oauth_token_secret")
 
         if access_token and access_token_secret:
-            fetch_bookmarks_by_tag(access_token, access_token_secret)
+            fetch_bookmarks_by_tag(access_token, access_token_secret, args.save_dir)
         else:
             print("❌ エラー: トークンファイルからアクセストークンを正しく読み込めませんでした。")
 
