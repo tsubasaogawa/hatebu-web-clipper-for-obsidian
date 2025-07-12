@@ -1,0 +1,22 @@
+{
+    "rules": [
+        {
+            "name": "Run",
+            "description": "Run the main Python script.",
+            "pattern": "main.py",
+            "command": "python main.py"
+        },
+        {
+            "name": "Lint",
+            "description": "Lint the Python code with pylint.",
+            "pattern": "**/*.py",
+            "command": "pylint ${file}"
+        },
+        {
+            "name": "Test",
+            "description": "Run tests with pytest.",
+            "pattern": "test_*.py",
+            "command": "pytest ${file}"
+        }
+    ]
+}
