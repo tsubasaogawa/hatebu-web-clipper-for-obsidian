@@ -14,9 +14,9 @@
         },
         {
             "name": "Test",
-            "description": "Run tests with pytest.",
+            "description": "Run tests with unittest.",
             "pattern": "test_*.py",
-            "command": "pytest ${file}"
+            "command": "bash -c 'PACKAGES=$(grep -A 5 \"dependencies =\" main.py | grep -o \"\\\".*\\\"\" | sed \"s/\\\"//g\" | sed \"s/.*/--with &/\" | tr \"\\n\" \" \"); uv tool run $PACKAGES -- python -m unittest \"${file}\"'"
         }
     ]
 }
