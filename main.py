@@ -9,6 +9,7 @@
 #     "python-dotenv>=1.0.1",
 #     "markitdown>=0.1.2",
 #     "requests>=2.32.3",
+#     "pathvalidate>=3.2.0",
 # ]
 # requires-python = ">=3.10"
 # ///
@@ -17,61 +18,62 @@ import os
 import json
 import requests
 import io
+import datetime
+import argparse
 from markitdown import MarkItDown
+from pathvalidate import sanitize_filename
 from dotenv import load_dotenv
 from requests_oauthlib import OAuth1Session
 
-# .envファイルを読み込む
+# Load .env file
 load_dotenv()
 
-# --- 1. 定数設定 ---
 CONSUMER_KEY = os.getenv("HATENA_CONSUMER_KEY")
 CONSUMER_SECRET = os.getenv("HATENA_CONSUMER_SECRET")
 TOKEN_FILE = "tokens.json"
 
-# Hatena OAuth エンドポイント
 REQUEST_TOKEN_URL = "https://www.hatena.com/oauth/initiate"
 AUTHORIZATION_URL = "https://www.hatena.ne.jp/oauth/authorize"
 ACCESS_TOKEN_URL = "https://www.hatena.com/oauth/token"
-
-# --- 2. APIリクエスト情報 (ご指定のエンドポイントに更新) ---
-TAG = "obsidian"
 SEARCH_API_URL = "https://b.hatena.ne.jp/my/search/json"
+DELETE_BOOKMARK_URL = "https://bookmark.hatenaapis.com/rest/1/my/bookmark"
+
+TAG = os.getenv("TARGET_TAG_NAME", "obsidian")
 
 
 def get_access_tokens():
     """
-    OAuth認証フローを実行し、アクセストークンを取得して保存する。
+    Execute the OAuth authentication flow to obtain and save access tokens.
     """
-    # Step 1: リクエストトークンの取得
-    # 必要な権限を scope で指定する (read_public, read_private, write_public, write_private)
-    params = {"scope": "read_public,read_private"}
+    # Step 1: Get Request Token
+    # Specify necessary permissions with scope (read_public, read_private, write_public, write_private)
+    params = {"scope": "read_public,read_private,write_public,write_private"}
     hatena_oauth = OAuth1Session(
         client_key=CONSUMER_KEY,
         client_secret=CONSUMER_SECRET,
         callback_uri="oob" # Out-of-Band
     )
 
-    print("リクエストトークンを取得しています...")
+    print("Getting request token...")
     try:
         fetch_response = hatena_oauth.fetch_request_token(REQUEST_TOKEN_URL, params=params)
     except Exception as e:
-        print(f"❌ エラー: リクエストトークンの取得に失敗しました。{e}")
+        print(f"❌ Error: Failed to get request token. {e}")
         return None
 
     resource_owner_key = fetch_response.get("oauth_token")
     resource_owner_secret = fetch_response.get("oauth_token_secret")
 
-    # Step 2: ユーザー認証とVerifierの取得
+    # Step 2: User Authentication and Get Verifier
     authorization_url = hatena_oauth.authorization_url(AUTHORIZATION_URL)
     print("-" * 50)
-    print("以下のURLにアクセスしてアプリケーションを認証してください：")
+    print("Please access the following URL to authenticate the application:")
     print(authorization_url)
     print("-" * 50)
 
-    verifier = input("認証後に表示されるPINコード（Verifier）を入力してください: ")
+    verifier = input("Please enter the PIN code (Verifier) displayed after authentication: ")
 
-    # Step 3: アクセストークンの取得
+    # Step 3: Get Access Token
     hatena_oauth = OAuth1Session(
         client_key=CONSUMER_KEY,
         client_secret=CONSUMER_SECRET,
@@ -80,42 +82,44 @@ def get_access_tokens():
         verifier=verifier,
     )
 
-    print("アクセストークンを取得しています...")
+    print("Getting access token...")
     try:
         oauth_tokens = hatena_oauth.fetch_access_token(ACCESS_TOKEN_URL)
     except Exception as e:
-        print(f"❌ エラー: アクセストークンの取得に失敗しました。{e}")
+        print(f"❌ Error: Failed to get access token. {e}")
         return None
 
-    # 取得したトークンを保存
+    # Save the obtained tokens
     with open(TOKEN_FILE, "w") as f:
         json.dump(oauth_tokens, f)
-    print(f"🔑 アクセストークンを {TOKEN_FILE} に保存しました。")
+    print(f"🔑 Access tokens saved to {TOKEN_FILE}.")
 
     return oauth_tokens
 
 
 def load_or_create_tokens():
     """
-    保存されたトークンを読み込む。なければ新規作成フローを呼び出す。
+    Load saved tokens. If not present, call the new creation flow.
     """
     if os.path.exists(TOKEN_FILE):
-        print(f"{TOKEN_FILE} からアクセストークンを読み込みます。")
+        print(f"Loading access tokens from {TOKEN_FILE}.")
         with open(TOKEN_FILE, "r") as f:
             return json.load(f)
     else:
-        print(f"{TOKEN_FILE} が見つかりません。新規に認証フローを開始します。")
+        print(f"Could not find {TOKEN_FILE}. Starting new authentication flow.")
         return get_access_tokens()
 
 
-def fetch_bookmarks_by_tag(access_token, access_token_secret):
+def fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir, dryrun=False):
     """
-    はてなブックマークの指定されたAPIを使い、タグでブックマークを取得する。
+    Fetch bookmarks by tag using the specified Hatena Bookmark API.
     """
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        print(f"Saving Markdown files to '{save_dir}'.")
 
-    md = MarkItDown() # MarkItDownのインスタンスを作成
-
-    # OAuth1セッションを作成
+    md = MarkItDown() # Create an instance of MarkItDown
+    # Create an OAuth1 session
     try:
         hatena = OAuth1Session(
             client_key=CONSUMER_KEY,
@@ -124,44 +128,46 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
             resource_owner_secret=access_token_secret,
         )
     except Exception as e:
-        print(f"OAuthセッションの作成中にエラーが発生しました: {e}")
+        print(f"An error occurred while creating the OAuth session: {e}")
         return
 
-    # APIにリクエストを送信
+    # Send a request to the API
     params = {"q": f"{TAG}"}
-    print(f"🔍 '{TAG}' タグでブックマークを検索しています (エンドポイント: {SEARCH_API_URL})...")
+    print(f"🔍 Searching for bookmarks with tag '{TAG}' (Endpoint: {SEARCH_API_URL})...")
 
     try:
         response = hatena.get(SEARCH_API_URL, params=params)
         response.raise_for_status()
     except Exception as e:
-        print(f"APIリクエスト中にエラーが発生しました: {e}")
+        print(f"An error occurred during the API request: {e}")
         if 'response' in locals() and response is not None:
-            print(f"ステータスコード: {response.status_code}")
-            print(f"レスポンス: {response.text}")
+            print(f"Status code: {response.status_code}")
+            print(f"Response: {response.text}")
         return
 
-    # --- 結果のパース (JSON形式) ---
+    # --- Parse results (JSON format) ---
     try:
         data = response.json()
-        # レスポンスに 'bookmarks' キーが存在するかチェック
+        # Check if 'bookmarks' key exists in the response
         bookmarks = data.get("bookmarks", [])
 
         if not bookmarks:
-            print("指定されたタグのブックマークは見つかりませんでした。")
-            # レスポンスにエラーメッセージが含まれているか確認
+            print("No bookmarks found for the specified tag.")
+            # Check if the response contains an error message
             if "error" in data:
-                print(f"APIからのエラーメッセージ: {data['error']}")
+                print(f"Error message from API: {data['error']}")
             return
 
-        print(f"\n✅ --- 「{TAG}」タグのブックマーク一覧 ({len(bookmarks)}件) ---")
+        print(f"\n✅ --- Bookmark list for tag '{TAG}' ({len(bookmarks)} items) ---")
         for bookmark in bookmarks:
-            # JSONレスポンスの構造に合わせてキーを指定
+            # Specify keys according to the JSON response structure
             entry = bookmark.get("entry", {})
             url = entry.get("url")
+            title = entry.get("title", "No Title")
+            safe_title = sanitize_filename(title)
 
             if not url:
-                print("URLが見つかりませんでした。スキップします。")
+                print("URL not found. Skipping.")
                 continue
 
             try:
@@ -171,15 +177,42 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
                 html_content = response.text
 
                 print("🔄 Converting HTML to Markdown...")
-                # HTMLコンテンツをバイナリストリームに変換
-                # ファイル名を指定することで、HTMLコンバーターが選択されるようにする
                 html_stream = io.BytesIO(html_content.encode('utf-8'))
                 result = md.convert(html_stream, input_filename="page.html")
                 markdown_content = result.text_content
 
-                print("\n--- Markdown Output ---")
-                print(markdown_content)
-                print("--- End of Markdown ---\n")
+                if save_dir:
+                    yyyymmdd = datetime.date.today().strftime('%Y%m%d')
+                    file_name = f"{yyyymmdd}_{safe_title}.md"
+                    file_path = os.path.join(save_dir, file_name)
+
+                    print(f"💾 Saving Markdown to {file_path}...")
+                    if not dryrun:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(markdown_content)
+
+                    print(f"✅ Saved successfully.")
+
+                    # Delete bookmark
+                    if not dryrun:
+                        print(f"🗑️ Deleting bookmark for {url}...")
+                        try:
+                            delete_response = hatena.delete(DELETE_BOOKMARK_URL, params={"url": url})
+                            delete_response.raise_for_status()
+                            print("✅ Bookmark deleted successfully.")
+                        except Exception as e:
+                            print(f"❌ Error deleting bookmark for {url}: {e}")
+                            if 'delete_response' in locals() and delete_response is not None:
+                                print(f"Status code: {delete_response.status_code}")
+                                print(f"Response: {delete_response.text}")
+                    else:
+                        print(f"DRY RUN: Skipping bookmark deletion for {url}.")
+
+                else:
+                    # If no save destination is specified, output to standard output
+                    print("\n--- Markdown Output ---")
+                    print(markdown_content)
+                    print("--- End of Markdown ---\n")
 
             except requests.RequestException as e:
                 print(f"❌ Error fetching URL {url}: {e}")
@@ -188,36 +221,43 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret):
 
 
     except json.JSONDecodeError:
-        print("❌ JSONのパース中にエラーが発生しました。レスポンスがJSON形式ではない可能性があります。")
-        print(f"レスポンス内容:\n{response.text}")
+        print("❌ An error occurred while parsing JSON. The response may not be in JSON format.")
+        print(f"Response content:\n{response.text}")
         return
 
 def main():
     """
-    メイン処理
+    Main process
     """
-    # .envファイルから環境変数を再読み込み
-    # これにより、CONSUMER_KEYとCONSUMER_SECRETが正しく設定される
+    parser = argparse.ArgumentParser(description="Fetch Hatena Bookmarks and convert to Markdown.")
+    parser.add_argument("--save-dir", type=str, help="Directory to save Markdown files. SAVE_DIR environment variable will be used if specified.")
+    parser.add_argument("--dryrun", action="store_true", help="Dry-run.")
+    args = parser.parse_args()
+
+    save_dir = os.getenv("SAVE_DIR", args.save_dir)
+
+    # Reload environment variables from .env file
+    # This ensures that CONSUMER_KEY and CONSUMER_SECRET are set correctly
     global CONSUMER_KEY, CONSUMER_SECRET
     CONSUMER_KEY = os.getenv("HATENA_CONSUMER_KEY")
     CONSUMER_SECRET = os.getenv("HATENA_CONSUMER_SECRET")
 
-    # 認証情報が設定されているかチェック
+    # Check if authentication information is set
     if not all([CONSUMER_KEY, CONSUMER_SECRET]):
-        print("🚫 エラー: 必要な環境変数が設定されていません。")
-        print("HATENA_CONSUMER_KEY, HATENA_CONSUMER_SECRET を .env ファイルに設定するか、環境変数として設定してください。")
+        print("🚫 Error: Required environment variables are not set.")
+        print("Please set HATENA_CONSUMER_KEY and HATENA_CONSUMER_SECRET in the .env file or as environment variables.")
         return
 
-    # トークンを取得または読み込み
+    # Get or load tokens
     tokens = load_or_create_tokens()
     if tokens:
         access_token = tokens.get("oauth_token")
         access_token_secret = tokens.get("oauth_token_secret")
 
         if access_token and access_token_secret:
-            fetch_bookmarks_by_tag(access_token, access_token_secret)
+            fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir, args.dryrun)
         else:
-            print("❌ エラー: トークンファイルからアクセストークンを正しく読み込めませんでした。")
+            print("❌ Error: Could not correctly load access tokens from the token file.")
 
 if __name__ == "__main__":
     main()
