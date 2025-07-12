@@ -43,8 +43,59 @@ class TestMain(unittest.TestCase):
     @patch("main.requests.get")
     @patch("main.OAuth1Session")
     @patch("builtins.open", new_callable=mock_open)
-    def test_fetch_bookmarks_by_tag_success(self, mock_file, mock_oauth_session, mock_requests_get):
-        """ブックマークの取得とMarkdown保存が成功するケースをテスト"""
+    def test_fetch_bookmarks_and_delete_success(self, mock_file, mock_oauth_session, mock_requests_get):
+        """ブックマークの取得、保存、削除が成功するケースをテスト"""
+        # OAuth1Sessionのモック設定
+        mock_session_instance = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "bookmarks": [
+                {
+                    "entry": {
+                        "url": "http://example.com",
+                        "title": "Example Title"
+                    }
+                }
+            ]
+        }
+        mock_session_instance.get.return_value = mock_response
+        # deleteメソッドのモック
+        mock_delete_response = MagicMock()
+        mock_delete_response.raise_for_status.return_value = None
+        mock_session_instance.delete.return_value = mock_delete_response
+        mock_oauth_session.return_value = mock_session_instance
+
+        # requests.getのモック設定 (HTML取得)
+        mock_html_response = MagicMock()
+        mock_html_response.status_code = 200
+        mock_html_response.text = "<html><body><h1>Hello</h1></body></html>"
+        mock_requests_get.return_value = mock_html_response
+
+        # テスト対象の関数を呼び出し (dryrun=Falseはデフォルト)
+        main.fetch_bookmarks_by_tag("test_token", "test_secret", "test_save_dir")
+
+        # アサーション
+        mock_oauth_session.assert_called_with(
+            client_key="test_consumer_key",
+            client_secret="test_consumer_secret",
+            resource_owner_key="test_token",
+            resource_owner_secret="test_secret",
+        )
+        mock_session_instance.get.assert_called_once()
+        mock_requests_get.assert_called_with("http://example.com", timeout=10)
+        
+        # ファイル書き込みと削除API呼び出しを確認
+        mock_file().write.assert_called_once()
+        self.assertEqual(main.DELETE_BOOKMARK_URL, "https://bookmark.hatenaapis.com/rest/1/my/bookmark")
+        mock_session_instance.delete.assert_called_once_with(main.DELETE_BOOKMARK_URL, params={"url": "http://example.com"})
+
+
+    @patch("main.requests.get")
+    @patch("main.OAuth1Session")
+    @patch("builtins.open", new_callable=mock_open)
+    def test_fetch_bookmarks_with_dryrun_does_not_delete(self, mock_file, mock_oauth_session, mock_requests_get):
+        """--dryrun オプションを付けた場合にブックマークが削除されないことをテスト"""
         # OAuth1Sessionのモック設定
         mock_session_instance = MagicMock()
         mock_response = MagicMock()
@@ -68,21 +119,15 @@ class TestMain(unittest.TestCase):
         mock_html_response.text = "<html><body><h1>Hello</h1></body></html>"
         mock_requests_get.return_value = mock_html_response
 
-        # テスト対象の関数を呼び出し
-        main.fetch_bookmarks_by_tag("test_token", "test_secret", "test_save_dir")
+        # テスト対象の関数を呼び出し (dryrun=True)
+        main.fetch_bookmarks_by_tag("test_token", "test_secret", "test_save_dir", dryrun=True)
 
         # アサーション
-        mock_oauth_session.assert_called_with(
-            client_key="test_consumer_key",
-            client_secret="test_consumer_secret",
-            resource_owner_key="test_token",
-            resource_owner_secret="test_secret",
-        )
         mock_session_instance.get.assert_called_once()
-        mock_requests_get.assert_called_with("http://example.com", timeout=10)
-        
-        # ファイル書き込みが呼ばれたことを確認
-        mock_file().write.assert_called_once()
+        # dryrun時はファイル書き込みが行われないことを確認
+        mock_file().write.assert_not_called()
+        # 削除が呼ばれていないことを確認
+        mock_session_instance.delete.assert_not_called()
 
 
     @patch("main.OAuth1Session")
@@ -105,16 +150,18 @@ class TestMain(unittest.TestCase):
     @patch('main.fetch_bookmarks_by_tag')
     def test_main_success(self, mock_fetch, mock_load_tokens, mock_args):
         """main関数が正常に実行されることをテスト"""
-        mock_args.return_value = MagicMock(save_dir="some/dir")
-        mock_load_tokens.return_value = {
-            "oauth_token": "test_token",
-            "oauth_token_secret": "test_secret"
-        }
-        
-        main.main()
+        # このテストでは SAVE_DIR 環境変数が設定されていないことを保証する
+        with patch.dict(os.environ, self.mock_env, clear=True):
+            mock_args.return_value = MagicMock(save_dir="some/dir", dryrun=False)
+            mock_load_tokens.return_value = {
+                "oauth_token": "test_token",
+                "oauth_token_secret": "test_secret"
+            }
+            
+            main.main()
 
-        mock_load_tokens.assert_called_once()
-        mock_fetch.assert_called_once_with("test_token", "test_secret", "some/dir")
+            mock_load_tokens.assert_called_once()
+            mock_fetch.assert_called_once_with("test_token", "test_secret", "some/dir", False)
 
     @patch('argparse.ArgumentParser.parse_args')
     @patch.dict(os.environ, {"HATENA_CONSUMER_KEY": "", "HATENA_CONSUMER_SECRET": ""})

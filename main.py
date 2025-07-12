@@ -39,8 +39,9 @@ AUTHORIZATION_URL = "https://www.hatena.ne.jp/oauth/authorize"
 ACCESS_TOKEN_URL = "https://www.hatena.com/oauth/token"
 
 # --- 2. APIリクエスト情報 (ご指定のエンドポイントに更新) ---
-TAG = "obsidian"
+TAG = os.getenv("TARGET_TAG_NAME", "obsidian")
 SEARCH_API_URL = "https://b.hatena.ne.jp/my/search/json"
+DELETE_BOOKMARK_URL = "https://bookmark.hatenaapis.com/rest/1/my/bookmark"
 
 
 def get_access_tokens():
@@ -49,7 +50,7 @@ def get_access_tokens():
     """
     # Step 1: リクエストトークンの取得
     # 必要な権限を scope で指定する (read_public, read_private, write_public, write_private)
-    params = {"scope": "read_public,read_private"}
+    params = {"scope": "read_public,read_private,write_public,write_private"}
     hatena_oauth = OAuth1Session(
         client_key=CONSUMER_KEY,
         client_secret=CONSUMER_SECRET,
@@ -112,7 +113,7 @@ def load_or_create_tokens():
         return get_access_tokens()
 
 
-def fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir):
+def fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir, dryrun=False):
     """
     はてなブックマークの指定されたAPIを使い、タグでブックマークを取得する。
     """
@@ -189,9 +190,27 @@ def fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir):
                     file_path = os.path.join(save_dir, file_name)
 
                     print(f"💾 Saving Markdown to {file_path}...")
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(markdown_content)
+                    if not dryrun:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(markdown_content)
+
                     print(f"✅ Saved successfully.")
+
+                    # ブックマークを削除
+                    if not dryrun:
+                        print(f"🗑️ Deleting bookmark for {url}...")
+                        try:
+                            delete_response = hatena.delete(DELETE_BOOKMARK_URL, params={"url": url})
+                            delete_response.raise_for_status()
+                            print("✅ Bookmark deleted successfully.")
+                        except Exception as e:
+                            print(f"❌ Error deleting bookmark for {url}: {e}")
+                            if 'delete_response' in locals() and delete_response is not None:
+                                print(f"ステータスコード: {delete_response.status_code}")
+                                print(f"レスポンス: {delete_response.text}")
+                    else:
+                        print(f"DRY RUN: Skipping bookmark deletion for {url}.")
+
                 else:
                     # 保存先が指定されていない場合は標準出力する
                     print("\n--- Markdown Output ---")
@@ -214,8 +233,11 @@ def main():
     メイン処理
     """
     parser = argparse.ArgumentParser(description="Fetch Hatena Bookmarks and convert to Markdown.")
-    parser.add_argument("--save-dir", type=str, help="Directory to save Markdown files.")
+    parser.add_argument("--save-dir", type=str, help="Directory to save Markdown files. SAVE_DIR environment variable will be used if specified.")
+    parser.add_argument("--dryrun", action="store_true", help="Dry-run.")
     args = parser.parse_args()
+
+    save_dir = os.getenv("SAVE_DIR", args.save_dir)
 
     # .envファイルから環境変数を再読み込み
     # これにより、CONSUMER_KEYとCONSUMER_SECRETが正しく設定される
@@ -236,7 +258,7 @@ def main():
         access_token_secret = tokens.get("oauth_token_secret")
 
         if access_token and access_token_secret:
-            fetch_bookmarks_by_tag(access_token, access_token_secret, args.save_dir)
+            fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir, args.dryrun)
         else:
             print("❌ エラー: トークンファイルからアクセストークンを正しく読み込めませんでした。")
 
