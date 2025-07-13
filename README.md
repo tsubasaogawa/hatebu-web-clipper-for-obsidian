@@ -34,6 +34,13 @@ mv .env.tmpl .env
 
 The first time you run it, OAuth authentication is required, so please follow the instructions on the console to authenticate the application.
 
+### Options
+
+- `--save-dir`: Directory to save Markdown files. Overrides `SAVE_DIR` in the `.env` file.
+- `--tag`: Tag to search for. Overrides `TARGET_TAG_NAME` in the `.env` file (default: `obsidian`).
+- `--dryrun`: Dry-run mode. No files will be written or bookmarks deleted.
+- `--delete-bookmark`: (true|false) Delete the bookmark after processing. Defaults to `true`.
+
 ## Limitations
 
 - The quality of the clipped content is lower than that of the Obsidian Web Clipper (depends on the performance of markitdown).

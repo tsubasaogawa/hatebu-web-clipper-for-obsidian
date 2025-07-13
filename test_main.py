@@ -3,179 +3,130 @@ import os
 import json
 import shutil
 from unittest.mock import patch, MagicMock, mock_open
-import main
+from main import HatebuClipper, main as main_func
 
-class TestMain(unittest.TestCase):
+class TestHatebuClipper(unittest.TestCase):
 
     def setUp(self):
-        """Set environment variables before tests."""
-        self.mock_env = {
-            "HATENA_CONSUMER_KEY": "test_consumer_key",
-            "HATENA_CONSUMER_SECRET": "test_consumer_secret",
-        }
-        self.patcher = patch.dict(os.environ, self.mock_env)
-        self.patcher.start()
-        main.CONSUMER_KEY = self.mock_env["HATENA_CONSUMER_KEY"]
-        main.CONSUMER_SECRET = self.mock_env["HATENA_CONSUMER_SECRET"]
+        """Set up test environment."""
+        self.consumer_key = "test_consumer_key"
+        self.consumer_secret = "test_consumer_secret"
+        self.save_dir = "test_save_dir"
+        # Ensure the test save directory is clean before each test
+        if os.path.exists(self.save_dir):
+            shutil.rmtree(self.save_dir)
 
     def tearDown(self):
-        """Stop patches after tests."""
-        self.patcher.stop()
-        if os.path.exists("test_save_dir"):
-            shutil.rmtree("test_save_dir")
+        """Clean up test environment."""
+        if os.path.exists(self.save_dir):
+            shutil.rmtree(self.save_dir)
 
-    @patch("os.path.exists")
+    def test_init_raises_error_on_missing_keys(self):
+        """Test that ValueError is raised if consumer keys are missing."""
+        with self.assertRaises(ValueError):
+            HatebuClipper(consumer_key=None, consumer_secret=self.consumer_secret)
+        with self.assertRaises(ValueError):
+            HatebuClipper(consumer_key=self.consumer_key, consumer_secret=None)
+
+    @patch("os.path.exists", return_value=True)
     @patch("builtins.open", new_callable=mock_open, read_data='{"oauth_token": "test_token", "oauth_token_secret": "test_secret"}')
     def test_load_or_create_tokens_existing(self, mock_file, mock_exists):
-        """Test that tokens are loaded correctly if the token file exists."""
-        mock_exists.return_value = True
-        tokens = main.load_or_create_tokens()
+        """Test loading existing tokens."""
+        clipper = HatebuClipper(self.consumer_key, self.consumer_secret)
+        tokens = clipper._load_or_create_tokens()
         self.assertEqual(tokens["oauth_token"], "test_token")
-        mock_file.assert_called_with(main.TOKEN_FILE, "r")
+        mock_file.assert_called_with(clipper.TOKEN_FILE, "r")
 
-    @patch("os.path.exists")
-    @patch("main.get_access_tokens")
+    @patch("os.path.exists", return_value=False)
+    @patch("main.HatebuClipper._get_access_tokens")
     def test_load_or_create_tokens_not_existing(self, mock_get_access_tokens, mock_exists):
-        """Test that the new token creation flow is called if the token file does not exist."""
-        mock_exists.return_value = False
+        """Test creating new tokens when file doesn't exist."""
         mock_get_access_tokens.return_value = {"oauth_token": "new_token"}
-        tokens = main.load_or_create_tokens()
+        clipper = HatebuClipper(self.consumer_key, self.consumer_secret)
+        tokens = clipper._load_or_create_tokens()
         self.assertEqual(tokens["oauth_token"], "new_token")
         mock_get_access_tokens.assert_called_once()
 
-    @patch("main.requests.get")
-    @patch("main.OAuth1Session")
+    @patch("main.HatebuClipper.authenticate", return_value=True)
+    @patch("main.HatebuClipper._fetch_bookmark_list")
+    @patch("main.HatebuClipper._download_and_convert")
+    @patch("main.HatebuClipper._save_markdown")
+    @patch("main.HatebuClipper._delete_bookmark")
+    def test_run_success_flow(self, mock_delete, mock_save, mock_convert, mock_fetch_list, mock_auth):
+        """Test the successful run flow."""
+        mock_fetch_list.return_value = [{"entry": {"url": "http://example.com", "title": "Example Title"}}]
+        mock_convert.return_value = "# Example Content"
+
+        clipper = HatebuClipper(self.consumer_key, self.consumer_secret, save_dir=self.save_dir)
+        clipper.run(tag="test_tag")
+
+        mock_auth.assert_called_once()
+        mock_fetch_list.assert_called_once_with("test_tag")
+        mock_convert.assert_called_once_with("http://example.com")
+        mock_save.assert_called_once_with("Example Title", "# Example Content")
+        mock_delete.assert_called_once_with("http://example.com")
+
+    @patch("main.HatebuClipper.authenticate", return_value=True)
+    @patch("main.HatebuClipper._fetch_bookmark_list")
+    @patch("main.HatebuClipper._download_and_convert")
     @patch("builtins.open", new_callable=mock_open)
-    def test_fetch_bookmarks_and_delete_success(self, mock_file, mock_oauth_session, mock_requests_get):
-        """Test the case where fetching, saving, and deleting bookmarks succeeds."""
-        # Mock settings for OAuth1Session
-        mock_session_instance = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "bookmarks": [
-                {
-                    "entry": {
-                        "url": "http://example.com",
-                        "title": "Example Title"
-                    }
-                }
-            ]
-        }
-        mock_session_instance.get.return_value = mock_response
-        # Mock for delete method
-        mock_delete_response = MagicMock()
-        mock_delete_response.raise_for_status.return_value = None
-        mock_session_instance.delete.return_value = mock_delete_response
-        mock_oauth_session.return_value = mock_session_instance
+    def test_run_dryrun_flow(self, mock_open_file, mock_convert, mock_fetch_list, mock_auth):
+        """Test that dryrun prevents file writing and bookmark deletion."""
+        clipper = HatebuClipper(self.consumer_key, self.consumer_secret, save_dir=self.save_dir, dryrun=True)
+        clipper.hatena_session = MagicMock()  # Mock the session to check delete call
 
-        # Mock settings for requests.get (HTML fetching)
-        mock_html_response = MagicMock()
-        mock_html_response.status_code = 200
-        mock_html_response.text = "<html><body><h1>Hello</h1></body></html>"
-        mock_requests_get.return_value = mock_html_response
+        mock_fetch_list.return_value = [{"entry": {"url": "http://example.com", "title": "Example Title"}}]
+        mock_convert.return_value = "# Example Content"
 
-        # Call the function to be tested (dryrun=False is the default)
-        main.fetch_bookmarks_by_tag("test_token", "test_secret", "test_save_dir")
+        clipper.run(tag="test_tag")
 
-        # Assertions
-        mock_oauth_session.assert_called_with(
-            client_key="test_consumer_key",
-            client_secret="test_consumer_secret",
-            resource_owner_key="test_token",
-            resource_owner_secret="test_secret",
-        )
-        mock_session_instance.get.assert_called_once()
-        mock_requests_get.assert_called_with("http://example.com", timeout=10)
+        mock_auth.assert_called_once()
+        mock_fetch_list.assert_called_once_with("test_tag")
+        mock_convert.assert_called_once_with("http://example.com")
         
-        # Check file writing and delete API call
-        mock_file().write.assert_called_once()
-        self.assertEqual(main.DELETE_BOOKMARK_URL, "https://bookmark.hatenaapis.com/rest/1/my/bookmark")
-        mock_session_instance.delete.assert_called_once_with(main.DELETE_BOOKMARK_URL, params={"url": "http://example.com"})
-
-
-    @patch("main.requests.get")
-    @patch("main.OAuth1Session")
-    @patch("builtins.open", new_callable=mock_open)
-    def test_fetch_bookmarks_with_dryrun_does_not_delete(self, mock_file, mock_oauth_session, mock_requests_get):
-        """Test that bookmarks are not deleted when the --dryrun option is used."""
-        # Mock settings for OAuth1Session
-        mock_session_instance = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "bookmarks": [
-                {
-                    "entry": {
-                        "url": "http://example.com",
-                        "title": "Example Title"
-                    }
-                }
-            ]
-        }
-        mock_session_instance.get.return_value = mock_response
-        mock_oauth_session.return_value = mock_session_instance
-
-        # Mock settings for requests.get (HTML fetching)
-        mock_html_response = MagicMock()
-        mock_html_response.status_code = 200
-        mock_html_response.text = "<html><body><h1>Hello</h1></body></html>"
-        mock_requests_get.return_value = mock_html_response
-
-        # Call the function to be tested (dryrun=True)
-        main.fetch_bookmarks_by_tag("test_token", "test_secret", "test_save_dir", dryrun=True)
-
-        # Assertions
-        mock_session_instance.get.assert_called_once()
-        # Check that file writing is not performed during dryrun
-        mock_file().write.assert_not_called()
-        # Check that delete is not called
-        mock_session_instance.delete.assert_not_called()
-
-
-    @patch("main.OAuth1Session")
-    def test_fetch_bookmarks_by_tag_no_bookmarks(self, mock_oauth_session):
-        """Test the case where no bookmarks are found."""
-        mock_session_instance = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"bookmarks": []}
-        mock_session_instance.get.return_value = mock_response
-        mock_oauth_session.return_value = mock_session_instance
-
-        with patch('builtins.print') as mock_print:
-            main.fetch_bookmarks_by_tag("test_token", "test_secret", "test_save_dir")
-            # Check that "No bookmarks found" is printed
-            self.assertTrue(any("No bookmarks found" in call[0][0] for call in mock_print.call_args_list))
+        # Assert that file was not written and delete was not called
+        mock_open_file.assert_not_called()
+        clipper.hatena_session.delete.assert_not_called()
 
     @patch('argparse.ArgumentParser.parse_args')
-    @patch('main.load_or_create_tokens')
-    @patch('main.fetch_bookmarks_by_tag')
-    def test_main_success(self, mock_fetch, mock_load_tokens, mock_args):
-        """Test that the main function runs successfully."""
-        # Ensure that the SAVE_DIR environment variable is not set in this test
-        with patch.dict(os.environ, self.mock_env, clear=True):
-            mock_args.return_value = MagicMock(save_dir="some/dir", dryrun=False)
-            mock_load_tokens.return_value = {
-                "oauth_token": "test_token",
-                "oauth_token_secret": "test_secret"
-            }
+    @patch('main.HatebuClipper')
+    @patch.dict(os.environ, {
+        "HATENA_CONSUMER_KEY": "env_key",
+        "HATENA_CONSUMER_SECRET": "env_secret",
+        "SAVE_DIR": "env/dir",
+        "TARGET_TAG_NAME": "env_tag"
+    })
+    def test_main_function_with_args(self, mock_clipper_class, mock_args):
+        """Test the main function correctly parses args and calls the clipper."""
+        mock_args.return_value = MagicMock(save_dir="arg/dir", tag="arg_tag", dryrun=True)
+        mock_clipper_instance = MagicMock()
+        mock_clipper_class.return_value = mock_clipper_instance
+
+        main_func()
+
+        mock_clipper_class.assert_called_once_with(
+            consumer_key="env_key",
+            consumer_secret="env_secret",
+            save_dir="arg/dir",  # Arg should override env var
+            dryrun=True
+        )
+        mock_clipper_instance.run.assert_called_once_with(tag="arg_tag")
+
+    @patch('argparse.ArgumentParser.parse_args')
+    @patch.dict(os.environ, {"HATENA_CONSUMER_KEY": "", "HATENA_CONSUMER_SECRET": ""}, clear=True)
+    def test_main_function_no_env_vars(self, mock_args):
+        """Test main function exits gracefully if env vars are not set."""
+        mock_args.return_value = MagicMock(save_dir=None, tag="test", dryrun=False)
+        
+        with patch('main.logging.error') as mock_log_error, \
+             patch('builtins.print') as mock_print:
             
-            main.main()
-
-            mock_load_tokens.assert_called_once()
-            mock_fetch.assert_called_once_with("test_token", "test_secret", "some/dir", False)
-
-    @patch('argparse.ArgumentParser.parse_args')
-    @patch.dict(os.environ, {"HATENA_CONSUMER_KEY": "", "HATENA_CONSUMER_SECRET": ""})
-    def test_main_no_env_vars(self, mock_args):
-        """Test that the program exits with an error if environment variables are not set."""
-        main.CONSUMER_KEY = ""
-        main.CONSUMER_SECRET = ""
-        with patch('builtins.print') as mock_print:
-            main.main()
-            self.assertTrue(any("environment variables are not set" in call[0][0] for call in mock_print.call_args_list))
-
+            main_func()
+            
+            mock_log_error.assert_called_once()
+            self.assertIn("Initialization failed", mock_log_error.call_args[0][0])
+            mock_print.assert_called_once()
+            self.assertIn("Please set HATENA_CONSUMER_KEY", mock_print.call_args[0][0])
 
 if __name__ == "__main__":
     unittest.main()

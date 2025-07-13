@@ -14,9 +14,9 @@
         },
         {
             "name": "Test",
-            "description": "Run tests with unittest.",
+            "description": "Run tests with unittest, dynamically installing dependencies from main.py.",
             "pattern": "test_*.py",
-            "command": "uv run -- python -m unittest \"${file}\"'" TODO: "Run tests in the current file"
+            "command": "perl -nle 'print if /# dependencies = [[]/ .. /# []]/' main.py | tail -n +2 | head -n -1 | perl -pe 's/^ *# *//; s/[\"\",]//g' > .test_reqs.txt && uv venv .test_venv && uv pip install -p .test_venv/bin/python -r .test_reqs.txt && .test_venv/bin/python -m unittest \"${file}\"; rm -rf .test_venv .test_reqs.txt"
         }
     ]
 }
