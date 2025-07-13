@@ -7,7 +7,7 @@
 # dependencies = [
 #     "requests-oauthlib>=1.3.1",
 #     "python-dotenv>=1.0.1",
-#     "markitdown>=0.1.2",
+#     "markitdown[all]>=0.1.2",
 #     "requests>=2.32.3",
 #     "pathvalidate>=3.2.0",
 # ]
@@ -109,9 +109,9 @@ class HatebuClipper:
             logging.info(f"Loading access tokens from {self.TOKEN_FILE}.")
             with open(self.TOKEN_FILE, "r") as f:
                 return json.load(f)
-        else:
-            logging.warning(f"Could not find {self.TOKEN_FILE}. Starting new authentication flow.")
-            return self._get_access_tokens()
+
+        logging.warning(f"Could not find {self.TOKEN_FILE}. Starting new authentication flow.")
+        return self._get_access_tokens()
 
     def authenticate(self) -> bool:
         """Authenticate and create an OAuth session."""
@@ -156,23 +156,23 @@ class HatebuClipper:
             logging.error(f"Failed to fetch or parse bookmarks: {e}")
             return None
 
-    def _download_and_convert(self, url: str) -> Optional[str]:
-        """Download HTML from a URL and convert it to Markdown."""
-        try:
-            logging.info(f"Downloading HTML from {url}...")
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            html_content = response.text
+    def _download_and_convert(self, url: str) -> str:
+        """Download data from a URL and convert it to Markdown."""
 
-            logging.info("Converting HTML to Markdown...")
-            html_stream = io.BytesIO(html_content.encode('utf-8'))
-            result = self.md_converter.convert(html_stream, input_filename="page.html")
-            return result.text_content
-        except requests.RequestException as e:
-            logging.error(f"Error fetching URL {url}: {e}")
+        logging.info(f"Downloading data from {url}...")
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data_content = response.text
+
+        logging.info("Converting data to Markdown...")
+        data_stream = io.BytesIO(data_content.encode('utf-8'))
+        try:
+            result = self.md_converter.convert(data_stream, input_filename="page.data")
         except Exception as e:
-            logging.error(f"An unexpected error occurred during conversion: {e}")
-        return None
+            logging.error(f"Failed to convert data to Markdown: {e}")
+            return ""
+
+        return result.text_content
 
     def _save_markdown(self, title: str, content: str):
         """Save Markdown content to a file."""
@@ -186,12 +186,13 @@ class HatebuClipper:
         file_path = os.path.join(self.save_dir, file_name)
 
         logging.info(f"Saving Markdown to {file_path}...")
-        if not self.dryrun:
-            os.makedirs(self.save_dir, exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
-        else:
+        if self.dryrun:
             logging.info(f"DRY RUN: Skipping file write to {file_path}.")
+            return
+
+        os.makedirs(self.save_dir, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
 
     def _delete_bookmark(self, url: str):
         """Delete a bookmark from Hatena."""
@@ -200,17 +201,13 @@ class HatebuClipper:
             return
 
         logging.info(f"Deleting bookmark for {url}...")
-        if not self.dryrun:
-            try:
-                response = self.hatena_session.delete(self.API_URLS["delete_bookmark"], params={"url": url})
-                response.raise_for_status()
-                logging.info("Bookmark deleted successfully.")
-            except requests.RequestException as e:
-                logging.error(f"Error deleting bookmark for {url}: {e}")
-                if 'response' in locals() and response is not None:
-                    logging.error(f"Status: {response.status_code}, Response: {response.text}")
-        else:
+        if self.dryrun:
             logging.info(f"DRY RUN: Skipping bookmark deletion for {url}.")
+            return
+
+        response = self.hatena_session.delete(self.API_URLS["delete_bookmark"], params={"url": url})
+        response.raise_for_status()
+        logging.info("Bookmark deleted successfully.")
 
     def run(self, tag: str):
         """
@@ -237,14 +234,15 @@ class HatebuClipper:
             markdown_content = self._download_and_convert(url)
 
             if markdown_content:
-                if self.save_dir:
-                    self._save_markdown(title, markdown_content)
-                    self._delete_bookmark(url)
-                else:
-                    # If no save dir, just print to stdout
+                if not self.save_dir:
                     print("\n--- Markdown Output ---")
                     print(markdown_content)
                     print("--- End of Markdown ---\n")
+                    continue
+
+                self._save_markdown(title, markdown_content)
+                self._delete_bookmark(url)
+
         logging.info("--- All bookmarks processed. ---")
 
 
@@ -272,10 +270,11 @@ def main():
             save_dir=args.save_dir,
             dryrun=args.dryrun
         )
-        clipper.run(tag=args.tag)
     except ValueError as e:
         logging.error(f"Initialization failed: {e}")
         print("Please set HATENA_CONSUMER_KEY and HATENA_CONSUMER_SECRET in .env file or as environment variables.")
+
+    clipper.run(tag=args.tag)
 
 if __name__ == "__main__":
     main()
