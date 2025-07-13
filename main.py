@@ -1,8 +1,8 @@
 #!/usr/bin/env -S uv run --script
-# 
+#
 # /// script
 # name = "hatebu-web-clipper-for-obsidian"
-# version = "0.1.0"
+# version = "0.2.0"
 # description = "Fetch Hatena Bookmarks by tag using Hatena Bookmark API."
 # dependencies = [
 #     "requests-oauthlib>=1.3.1",
@@ -20,244 +20,262 @@ import requests
 import io
 import datetime
 import argparse
+import logging
+from typing import Optional, Dict, Any, List
 from markitdown import MarkItDown
 from pathvalidate import sanitize_filename
 from dotenv import load_dotenv
 from requests_oauthlib import OAuth1Session
 
-# Load .env file
-load_dotenv()
+# --- Setup Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-CONSUMER_KEY = os.getenv("HATENA_CONSUMER_KEY")
-CONSUMER_SECRET = os.getenv("HATENA_CONSUMER_SECRET")
-TOKEN_FILE = "tokens.json"
-
-REQUEST_TOKEN_URL = "https://www.hatena.com/oauth/initiate"
-AUTHORIZATION_URL = "https://www.hatena.ne.jp/oauth/authorize"
-ACCESS_TOKEN_URL = "https://www.hatena.com/oauth/token"
-SEARCH_API_URL = "https://b.hatena.ne.jp/my/search/json"
-DELETE_BOOKMARK_URL = "https://bookmark.hatenaapis.com/rest/1/my/bookmark"
-
-TAG = os.getenv("TARGET_TAG_NAME", "obsidian")
-
-
-def get_access_tokens():
+class HatebuClipper:
     """
-    Execute the OAuth authentication flow to obtain and save access tokens.
+    A class to fetch, convert, and manage Hatena Bookmarks.
     """
-    # Step 1: Get Request Token
-    # Specify necessary permissions with scope (read_public, read_private, write_public, write_private)
-    params = {"scope": "read_public,read_private,write_public,write_private"}
-    hatena_oauth = OAuth1Session(
-        client_key=CONSUMER_KEY,
-        client_secret=CONSUMER_SECRET,
-        callback_uri="oob" # Out-of-Band
-    )
+    # --- Constants ---
+    TOKEN_FILE = "tokens.json"
+    API_URLS = {
+        "request_token": "https://www.hatena.com/oauth/initiate",
+        "authorization": "https://www.hatena.ne.jp/oauth/authorize",
+        "access_token": "https://www.hatena.com/oauth/token",
+        "search_api": "https://b.hatena.ne.jp/my/search/json",
+        "delete_bookmark": "https://bookmark.hatenaapis.com/rest/1/my/bookmark",
+    }
 
-    print("Getting request token...")
-    try:
-        fetch_response = hatena_oauth.fetch_request_token(REQUEST_TOKEN_URL, params=params)
-    except Exception as e:
-        print(f"❌ Error: Failed to get request token. {e}")
-        return None
+    def __init__(self, consumer_key: str, consumer_secret: str, save_dir: Optional[str] = None, dryrun: bool = False):
+        """
+        Initializes the HatebuClipper.
 
-    resource_owner_key = fetch_response.get("oauth_token")
-    resource_owner_secret = fetch_response.get("oauth_token_secret")
+        Args:
+            consumer_key: Hatena API consumer key.
+            consumer_secret: Hatena API consumer secret.
+            save_dir: Directory to save Markdown files.
+            dryrun: If True, no files will be written or bookmarks deleted.
+        """
+        if not all([consumer_key, consumer_secret]):
+            raise ValueError("Consumer key and secret must be provided.")
 
-    # Step 2: User Authentication and Get Verifier
-    authorization_url = hatena_oauth.authorization_url(AUTHORIZATION_URL)
-    print("-" * 50)
-    print("Please access the following URL to authenticate the application:")
-    print(authorization_url)
-    print("-" * 50)
+        self.consumer_key = consumer_key
+        self.consumer_secret = consumer_secret
+        self.save_dir = save_dir
+        self.dryrun = dryrun
+        self.hatena_session: Optional[OAuth1Session] = None
+        self.md_converter = MarkItDown()
 
-    verifier = input("Please enter the PIN code (Verifier) displayed after authentication: ")
+    def _get_access_tokens(self) -> Optional[Dict[str, str]]:
+        """Execute OAuth flow to get and save new access tokens."""
+        params = {"scope": "read_public,read_private,write_public,write_private"}
+        oauth = OAuth1Session(client_key=self.consumer_key, client_secret=self.consumer_secret, callback_uri="oob")
 
-    # Step 3: Get Access Token
-    hatena_oauth = OAuth1Session(
-        client_key=CONSUMER_KEY,
-        client_secret=CONSUMER_SECRET,
-        resource_owner_key=resource_owner_key,
-        resource_owner_secret=resource_owner_secret,
-        verifier=verifier,
-    )
+        logging.info("Getting request token...")
+        try:
+            fetch_response = oauth.fetch_request_token(self.API_URLS["request_token"], params=params)
+        except Exception as e:
+            logging.error(f"Failed to get request token: {e}")
+            return None
 
-    print("Getting access token...")
-    try:
-        oauth_tokens = hatena_oauth.fetch_access_token(ACCESS_TOKEN_URL)
-    except Exception as e:
-        print(f"❌ Error: Failed to get access token. {e}")
-        return None
+        resource_owner_key = fetch_response.get("oauth_token")
+        resource_owner_secret = fetch_response.get("oauth_token_secret")
 
-    # Save the obtained tokens
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(oauth_tokens, f)
-    print(f"🔑 Access tokens saved to {TOKEN_FILE}.")
+        authorization_url = oauth.authorization_url(self.API_URLS["authorization"])
+        print("-" * 50)
+        print("Please access the following URL to authenticate:")
+        print(authorization_url)
+        print("-" * 50)
+        verifier = input("Please enter the PIN code (Verifier): ")
 
-    return oauth_tokens
-
-
-def load_or_create_tokens():
-    """
-    Load saved tokens. If not present, call the new creation flow.
-    """
-    if os.path.exists(TOKEN_FILE):
-        print(f"Loading access tokens from {TOKEN_FILE}.")
-        with open(TOKEN_FILE, "r") as f:
-            return json.load(f)
-    else:
-        print(f"Could not find {TOKEN_FILE}. Starting new authentication flow.")
-        return get_access_tokens()
-
-
-def fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir, dryrun=False):
-    """
-    Fetch bookmarks by tag using the specified Hatena Bookmark API.
-    """
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        print(f"Saving Markdown files to '{save_dir}'.")
-
-    md = MarkItDown() # Create an instance of MarkItDown
-    # Create an OAuth1 session
-    try:
-        hatena = OAuth1Session(
-            client_key=CONSUMER_KEY,
-            client_secret=CONSUMER_SECRET,
-            resource_owner_key=access_token,
-            resource_owner_secret=access_token_secret,
+        oauth = OAuth1Session(
+            client_key=self.consumer_key, client_secret=self.consumer_secret,
+            resource_owner_key=resource_owner_key, resource_owner_secret=resource_owner_secret,
+            verifier=verifier,
         )
-    except Exception as e:
-        print(f"An error occurred while creating the OAuth session: {e}")
-        return
 
-    # Send a request to the API
-    params = {"q": f"{TAG}"}
-    print(f"🔍 Searching for bookmarks with tag '{TAG}' (Endpoint: {SEARCH_API_URL})...")
+        logging.info("Getting access token...")
+        try:
+            oauth_tokens = oauth.fetch_access_token(self.API_URLS["access_token"])
+            with open(self.TOKEN_FILE, "w") as f:
+                json.dump(oauth_tokens, f)
+            logging.info(f"Access tokens saved to {self.TOKEN_FILE}.")
+            return oauth_tokens
+        except Exception as e:
+            logging.error(f"Failed to get access token: {e}")
+            return None
 
-    try:
-        response = hatena.get(SEARCH_API_URL, params=params)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"An error occurred during the API request: {e}")
-        if 'response' in locals() and response is not None:
-            print(f"Status code: {response.status_code}")
-            print(f"Response: {response.text}")
-        return
+    def _load_or_create_tokens(self) -> Optional[Dict[str, str]]:
+        """Load saved tokens or start the creation flow."""
+        if os.path.exists(self.TOKEN_FILE):
+            logging.info(f"Loading access tokens from {self.TOKEN_FILE}.")
+            with open(self.TOKEN_FILE, "r") as f:
+                return json.load(f)
+        else:
+            logging.warning(f"Could not find {self.TOKEN_FILE}. Starting new authentication flow.")
+            return self._get_access_tokens()
 
-    # --- Parse results (JSON format) ---
-    try:
-        data = response.json()
-        # Check if 'bookmarks' key exists in the response
-        bookmarks = data.get("bookmarks", [])
+    def authenticate(self) -> bool:
+        """Authenticate and create an OAuth session."""
+        tokens = self._load_or_create_tokens()
+        if not tokens:
+            logging.error("Authentication failed. Could not get tokens.")
+            return False
 
-        if not bookmarks:
-            print("No bookmarks found for the specified tag.")
-            # Check if the response contains an error message
-            if "error" in data:
-                print(f"Error message from API: {data['error']}")
-            return
-
-        print(f"\n✅ --- Bookmark list for tag '{TAG}' ({len(bookmarks)} items) ---")
-        for bookmark in bookmarks:
-            # Specify keys according to the JSON response structure
-            entry = bookmark.get("entry", {})
-            url = entry.get("url")
-            title = entry.get("title", "No Title")
-            safe_title = sanitize_filename(title)
-
-            if not url:
-                print("URL not found. Skipping.")
-                continue
-
-            try:
-                print(f"⬇️  Downloading HTML from {url}...")
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                html_content = response.text
-
-                print("🔄 Converting HTML to Markdown...")
-                html_stream = io.BytesIO(html_content.encode('utf-8'))
-                result = md.convert(html_stream, input_filename="page.html")
-                markdown_content = result.text_content
-
-                if save_dir:
-                    yyyymmdd = datetime.date.today().strftime('%Y%m%d')
-                    file_name = f"{yyyymmdd}_{safe_title}.md"
-                    file_path = os.path.join(save_dir, file_name)
-
-                    print(f"💾 Saving Markdown to {file_path}...")
-                    if not dryrun:
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            f.write(markdown_content)
-
-                    print(f"✅ Saved successfully.")
-
-                    # Delete bookmark
-                    if not dryrun:
-                        print(f"🗑️ Deleting bookmark for {url}...")
-                        try:
-                            delete_response = hatena.delete(DELETE_BOOKMARK_URL, params={"url": url})
-                            delete_response.raise_for_status()
-                            print("✅ Bookmark deleted successfully.")
-                        except Exception as e:
-                            print(f"❌ Error deleting bookmark for {url}: {e}")
-                            if 'delete_response' in locals() and delete_response is not None:
-                                print(f"Status code: {delete_response.status_code}")
-                                print(f"Response: {delete_response.text}")
-                    else:
-                        print(f"DRY RUN: Skipping bookmark deletion for {url}.")
-
-                else:
-                    # If no save destination is specified, output to standard output
-                    print("\n--- Markdown Output ---")
-                    print(markdown_content)
-                    print("--- End of Markdown ---\n")
-
-            except requests.RequestException as e:
-                print(f"❌ Error fetching URL {url}: {e}")
-            except Exception as e:
-                print(f"❌ An unexpected error occurred during conversion: {e}")
-
-
-    except json.JSONDecodeError:
-        print("❌ An error occurred while parsing JSON. The response may not be in JSON format.")
-        print(f"Response content:\n{response.text}")
-        return
-
-def main():
-    """
-    Main process
-    """
-    parser = argparse.ArgumentParser(description="Fetch Hatena Bookmarks and convert to Markdown.")
-    parser.add_argument("--save-dir", type=str, help="Directory to save Markdown files. SAVE_DIR environment variable will be used if specified.")
-    parser.add_argument("--dryrun", action="store_true", help="Dry-run.")
-    args = parser.parse_args()
-
-    save_dir = os.getenv("SAVE_DIR", args.save_dir)
-
-    # Reload environment variables from .env file
-    # This ensures that CONSUMER_KEY and CONSUMER_SECRET are set correctly
-    global CONSUMER_KEY, CONSUMER_SECRET
-    CONSUMER_KEY = os.getenv("HATENA_CONSUMER_KEY")
-    CONSUMER_SECRET = os.getenv("HATENA_CONSUMER_SECRET")
-
-    # Check if authentication information is set
-    if not all([CONSUMER_KEY, CONSUMER_SECRET]):
-        print("🚫 Error: Required environment variables are not set.")
-        print("Please set HATENA_CONSUMER_KEY and HATENA_CONSUMER_SECRET in the .env file or as environment variables.")
-        return
-
-    # Get or load tokens
-    tokens = load_or_create_tokens()
-    if tokens:
         access_token = tokens.get("oauth_token")
         access_token_secret = tokens.get("oauth_token_secret")
 
-        if access_token and access_token_secret:
-            fetch_bookmarks_by_tag(access_token, access_token_secret, save_dir, args.dryrun)
+        if not all([access_token, access_token_secret]):
+            logging.error("Access token or secret is missing in the token file.")
+            return False
+
+        self.hatena_session = OAuth1Session(
+            client_key=self.consumer_key, client_secret=self.consumer_secret,
+            resource_owner_key=access_token, resource_owner_secret=access_token_secret
+        )
+        logging.info("Authentication successful.")
+        return True
+
+    def _fetch_bookmark_list(self, tag: str) -> Optional[List[Dict[str, Any]]]:
+        """Fetch a list of bookmarks for a given tag."""
+        if not self.hatena_session:
+            logging.error("Session not authenticated.")
+            return None
+
+        params = {"q": tag}
+        logging.info(f"Searching for bookmarks with tag '{tag}'...")
+        try:
+            response = self.hatena_session.get(self.API_URLS["search_api"], params=params)
+            response.raise_for_status()
+            data = response.json()
+            bookmarks = data.get("bookmarks", [])
+            if not bookmarks:
+                logging.info("No bookmarks found for the specified tag.")
+                if "error" in data:
+                    logging.error(f"API Error: {data['error']}")
+            return bookmarks
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            logging.error(f"Failed to fetch or parse bookmarks: {e}")
+            return None
+
+    def _download_and_convert(self, url: str) -> Optional[str]:
+        """Download HTML from a URL and convert it to Markdown."""
+        try:
+            logging.info(f"Downloading HTML from {url}...")
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            html_content = response.text
+
+            logging.info("Converting HTML to Markdown...")
+            html_stream = io.BytesIO(html_content.encode('utf-8'))
+            result = self.md_converter.convert(html_stream, input_filename="page.html")
+            return result.text_content
+        except requests.RequestException as e:
+            logging.error(f"Error fetching URL {url}: {e}")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during conversion: {e}")
+        return None
+
+    def _save_markdown(self, title: str, content: str):
+        """Save Markdown content to a file."""
+        if not self.save_dir:
+            logging.warning("Save directory not specified. Skipping save.")
+            return
+
+        safe_title = sanitize_filename(title)
+        yyyymmdd = datetime.date.today().strftime('%Y%m%d')
+        file_name = f"{yyyymmdd}_{safe_title}.md"
+        file_path = os.path.join(self.save_dir, file_name)
+
+        logging.info(f"Saving Markdown to {file_path}...")
+        if not self.dryrun:
+            os.makedirs(self.save_dir, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
         else:
-            print("❌ Error: Could not correctly load access tokens from the token file.")
+            logging.info(f"DRY RUN: Skipping file write to {file_path}.")
+
+    def _delete_bookmark(self, url: str):
+        """Delete a bookmark from Hatena."""
+        if not self.hatena_session:
+            logging.error("Session not authenticated.")
+            return
+
+        logging.info(f"Deleting bookmark for {url}...")
+        if not self.dryrun:
+            try:
+                response = self.hatena_session.delete(self.API_URLS["delete_bookmark"], params={"url": url})
+                response.raise_for_status()
+                logging.info("Bookmark deleted successfully.")
+            except requests.RequestException as e:
+                logging.error(f"Error deleting bookmark for {url}: {e}")
+                if 'response' in locals() and response is not None:
+                    logging.error(f"Status: {response.status_code}, Response: {response.text}")
+        else:
+            logging.info(f"DRY RUN: Skipping bookmark deletion for {url}.")
+
+    def run(self, tag: str):
+        """
+        Main process to fetch, convert, save, and delete bookmarks.
+        """
+        if not self.authenticate():
+            return
+
+        bookmarks = self._fetch_bookmark_list(tag)
+        if not bookmarks:
+            return
+
+        logging.info(f"--- Found {len(bookmarks)} bookmarks for tag '{tag}' ---")
+        for bookmark in bookmarks:
+            entry = bookmark.get("entry", {})
+            url = entry.get("url")
+            title = entry.get("title", "No Title")
+
+            if not url:
+                logging.warning("Bookmark with no URL found. Skipping.")
+                continue
+
+            logging.info(f"\n--- Processing: {title} ({url}) ---")
+            markdown_content = self._download_and_convert(url)
+
+            if markdown_content:
+                if self.save_dir:
+                    self._save_markdown(title, markdown_content)
+                    self._delete_bookmark(url)
+                else:
+                    # If no save dir, just print to stdout
+                    print("\n--- Markdown Output ---")
+                    print(markdown_content)
+                    print("--- End of Markdown ---\n")
+        logging.info("--- All bookmarks processed. ---")
+
+
+def main():
+    """
+    Parses command-line arguments and runs the clipper.
+    """
+    load_dotenv()
+
+    parser = argparse.ArgumentParser(description="Fetch Hatena Bookmarks and convert to Markdown.")
+    parser.add_argument("--save-dir", type=str, default=os.getenv("SAVE_DIR"),
+                        help="Directory to save Markdown files. Overrides SAVE_DIR env var.")
+    parser.add_argument("--tag", type=str, default=os.getenv("TARGET_TAG_NAME", "obsidian"),
+                        help="Tag to search for. Overrides TARGET_TAG_NAME env var.")
+    parser.add_argument("--dryrun", action="store_true", help="Dry-run mode. No files written or bookmarks deleted.")
+    args = parser.parse_args()
+
+    consumer_key = os.getenv("HATENA_CONSUMER_KEY")
+    consumer_secret = os.getenv("HATENA_CONSUMER_SECRET")
+
+    try:
+        clipper = HatebuClipper(
+            consumer_key=consumer_key,
+            consumer_secret=consumer_secret,
+            save_dir=args.save_dir,
+            dryrun=args.dryrun
+        )
+        clipper.run(tag=args.tag)
+    except ValueError as e:
+        logging.error(f"Initialization failed: {e}")
+        print("Please set HATENA_CONSUMER_KEY and HATENA_CONSUMER_SECRET in .env file or as environment variables.")
 
 if __name__ == "__main__":
     main()
