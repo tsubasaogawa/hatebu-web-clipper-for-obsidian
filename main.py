@@ -244,7 +244,7 @@ class HatebuClipper:
                     self._save_markdown(title, markdown_content)
 
             if not self.delete_bookmark:
-                return
+                continue
 
             self._delete_bookmark(url)
 
