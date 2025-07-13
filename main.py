@@ -238,10 +238,10 @@ class HatebuClipper:
                     print("\n--- Markdown Output ---")
                     print(markdown_content)
                     print("--- End of Markdown ---\n")
-                    continue
+                else:
+                    self._save_markdown(title, markdown_content)
 
-                self._save_markdown(title, markdown_content)
-                self._delete_bookmark(url)
+            self._delete_bookmark(url)
 
         logging.info("--- All bookmarks processed. ---")
 
