@@ -281,6 +281,7 @@ def main():
     except ValueError as e:
         logging.error(f"Initialization failed: {e}")
         print("Please set HATENA_CONSUMER_KEY and HATENA_CONSUMER_SECRET in .env file or as environment variables.")
+        return
 
     clipper.run(tag=args.tag)
 
