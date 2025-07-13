@@ -44,7 +44,7 @@ class HatebuClipper:
         "delete_bookmark": "https://bookmark.hatenaapis.com/rest/1/my/bookmark",
     }
 
-    def __init__(self, consumer_key: str, consumer_secret: str, save_dir: Optional[str] = None, dryrun: bool = False):
+    def __init__(self, consumer_key: str, consumer_secret: str, save_dir: Optional[str] = None, dryrun: bool = False, delete_bookmark: bool = True):
         """
         Initializes the HatebuClipper.
 
@@ -53,6 +53,7 @@ class HatebuClipper:
             consumer_secret: Hatena API consumer secret.
             save_dir: Directory to save Markdown files.
             dryrun: If True, no files will be written or bookmarks deleted.
+            delete_bookmark: If False, bookmarks will not be deleted.
         """
         if not all([consumer_key, consumer_secret]):
             raise ValueError("Consumer key and secret must be provided.")
@@ -61,6 +62,7 @@ class HatebuClipper:
         self.consumer_secret = consumer_secret
         self.save_dir = save_dir
         self.dryrun = dryrun
+        self.delete_bookmark = delete_bookmark
         self.hatena_session: Optional[OAuth1Session] = None
         self.md_converter = MarkItDown()
 
@@ -241,6 +243,9 @@ class HatebuClipper:
                 else:
                     self._save_markdown(title, markdown_content)
 
+            if not self.delete_bookmark:
+                return
+
             self._delete_bookmark(url)
 
         logging.info("--- All bookmarks processed. ---")
@@ -258,6 +263,8 @@ def main():
     parser.add_argument("--tag", type=str, default=os.getenv("TARGET_TAG_NAME", "obsidian"),
                         help="Tag to search for. Overrides TARGET_TAG_NAME env var.")
     parser.add_argument("--dryrun", action="store_true", help="Dry-run mode. No files written or bookmarks deleted.")
+    parser.add_argument("--delete-bookmark", type=lambda x: (str(x).lower() == 'true'), default=True,
+                        help="Delete bookmark after processing. (default: True)")
     args = parser.parse_args()
 
     consumer_key = os.getenv("HATENA_CONSUMER_KEY")
@@ -268,7 +275,8 @@ def main():
             consumer_key=consumer_key,
             consumer_secret=consumer_secret,
             save_dir=args.save_dir,
-            dryrun=args.dryrun
+            dryrun=args.dryrun,
+            delete_bookmark=args.delete_bookmark
         )
     except ValueError as e:
         logging.error(f"Initialization failed: {e}")
