@@ -1,5 +1,7 @@
 # hatebu-web-clipper-for-obsidian
 
+![screenshot](https://github.com/user-attachments/assets/4f428d5d-d9d8-4ab4-b87a-28f51d8061a5)
+
 ## Motivation
 
 As of July 2025, there is no easy way to use the Obsidian Web Clipper on Android. A realistic method is to install Obsidian, Firefox, and the Obsidian Web Clipper extension on Android, but this is more cumbersome than on a PC (especially if Firefox is not your main browser).
