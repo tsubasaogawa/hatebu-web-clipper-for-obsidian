@@ -7,7 +7,7 @@
 # dependencies = [
 #     "requests-oauthlib>=1.3.1",
 #     "python-dotenv>=1.0.1",
-#     "markitdown[all]>=0.1.2",
+#     "markitdown[pdf]>=0.1.2",
 #     "requests>=2.32.3",
 #     "pathvalidate>=3.2.0",
 # ]
